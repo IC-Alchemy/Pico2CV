@@ -1,16 +1,19 @@
 
 // -----------------------------------------------------------------------------
-// 1. INCLUDES & DEFINES
+ // 1. INCLUDES & DEFINES
 // -----------------------------------------------------------------------------
+// --- CV PWM Pin Definitions ---
+#define CV1_PWM_PIN 2   // Pitch
+#define CV2_PWM_PIN 3   // Velocity
+#define CV3_PWM_PIN 4   // Filter
+#define CV4_PWM_PIN 5   // Envelope
+// Adjust pins as needed for your hardware
 // --- Audio & DSP ---
 #include <Adafruit_NeoPixel.h>
 
-#include "src/audio/audio.h"
-#include "src/audio/audio_i2s.h"
-#include "src/audio/audio_pins.h"
+
 #include "src/dsp/adsr.h"
 #include "src/dsp/ladder.h"
-#include "src/dsp/oscillator.h"
 #include "src/dsp/phasor.h"
 #include <cmath>
 #include <cstdint>
@@ -44,9 +47,7 @@ volatile int raw_mm = 0;
 volatile int mm = 0;
 Melopero_VL53L1X sensor;
 
-// --- I2S Pin Configuration ---
-#define PICO_AUDIO_I2S_DATA_PIN 15
-#define PICO_AUDIO_I2S_CLOCK_PIN_BASE 16
+
 #define IRQ_PIN 1
 
 #define NOTE_LENGTH    12 // min: 1 max: 23 DO NOT EDIT BEYOND!!! 12 = 50% on 96ppqn, same as original \
@@ -81,18 +82,9 @@ volatile bool button17Held = false;
 volatile bool button18Held = false;
 volatile bool recordButtonHeld = false;
 
-// --- Audio & Synth ---
-constexpr float SAMPLE_RATE = 44100.0f;
-constexpr float OSC_SUM_SCALING = 0.1f;
-constexpr float INT16_MAX_AS_FLOAT = 32767.0f;
-constexpr float INT16_MIN_AS_FLOAT = -32768.0f;
-constexpr int NUM_AUDIO_BUFFERS = 3;
-constexpr int SAMPLES_PER_BUFFER = 256;
-float baseFreq = 110.0f; // Hz
-constexpr float OSC_DETUNE_FACTOR = 1.01f;
+
 
 // --- Oscillators & Envelopes ---
-daisysp::Oscillator osc1, osc2, osc3, osc4;
 daisysp::LadderFilter filter;
 daisysp::Adsr env1;
 daisysp::Adsr env2;
@@ -108,17 +100,6 @@ const long interval = 1; // ms
 // 3. UTILITY FUNCTIONS
 // -----------------------------------------------------------------------------
 
-/**
- * @brief Converts a floating-point sample to int16_t with scaling, rounding,
- * and clamping.
- */
-static inline int16_t convertSampleToInt16(float sample) {
-  float scaled = sample * INT16_MAX_AS_FLOAT;
-  scaled = roundf(scaled);
-  scaled = daisysp::fclamp(scaled, INT16_MIN_AS_FLOAT, INT16_MAX_AS_FLOAT);
-  return static_cast<int16_t>(scaled);
-}
-
 
 
 float applyFilterFrequency(float targetFreq) {
@@ -129,77 +110,16 @@ float applyFilterFrequency(float targetFreq) {
       smoothingAlpha * targetFreq + (1.0f - smoothingAlpha) * currentFreq;
   return currentFreq;
 }
-// -----------------------------------------------------------------------------
-// 5. AUDIO: SYNTHESIS & BUFFER FILLING
-// -----------------------------------------------------------------------------
 
-/**
- * @brief Fills an audio buffer with synthesized stereo samples.
- */
-void fill_audio_buffer(audio_buffer_t *buffer) {
-  int N = buffer->max_sample_count;
-  int16_t *out = reinterpret_cast<int16_t *>(buffer->buffer->bytes);
-
-  for (int i = 0; i < N; ++i) {
-
-     // 1. Set Oscillator Frequencies based on note1 (from sequencer)
-    float osc_base_freq = daisysp::mtof(note1); // note1 is MIDI note from sequencer
-    osc1.SetFreq(osc_base_freq);
-    osc2.SetFreq(osc_base_freq * 1.009f); // Slight detune
-    osc3.SetFreq(osc_base_freq * 0.998f); // Slight detune
-
-    // 2. Process Amplitude Envelope (env1) based on trigenv1 (from sequencer gate)
-    // current_amp_env_value will be 0.0 to 1.0
-    float current_amp_env_value = env1.Process(trigenv1);
-
-    // 3. Set Filter Frequency based on freq1 (from sequencer step's filter value)
-    // freq1 is expected to be in Hz (e.g., 0-5000 Hz from Lidar mapping)
-    // Ensure a minimum cutoff frequency.
-    float target_filter_freq = daisysp::fmax(20.f, freq1); 
-    filter.SetFreq(target_filter_freq*current_amp_env_value);  //*current_amp_env_value);
-
-    // 4. Generate and sum oscillator outputs
-    float osc_sum = osc1.Process() + osc2.Process() + osc3.Process();
-
-    // 5. Process summed oscillators through the filter
-    float filtered_signal = filter.Process(osc_sum);
-
-    // 6. Apply amplitude envelope and step velocity to the filtered signal
-    // vel1 is 0.0 to 1.0 from sequencer step's velocity
-    float final_audio_signal = filtered_signal*vel1;//* (current_amp_env_value*1.1f);// * current_amp_env_value;
-
-    // 7. Scale for output (0.5f was the previous scaling factor)
-    float sumL = final_audio_signal * 0.5f;
-    float sumR = final_audio_signal * 0.5f;
-
-
-    int16_t intSampleL = convertSampleToInt16(sumL);
-    int16_t intSampleR = convertSampleToInt16(sumR);
-
-    out[2 * i + 0] = intSampleL;
-    out[2 * i + 1] = intSampleR;
-  }
-  buffer->sample_count = N;
-}
 
 // -----------------------------------------------------------------------------
 // 6. AUDIO: OSCILLATOR & ENVELOPE INITIALIZATION
 // -----------------------------------------------------------------------------
 
 void initOscillators() {
-  osc1.Init(SAMPLE_RATE);
-  osc2.Init(SAMPLE_RATE);
-  osc3.Init(SAMPLE_RATE);
-  osc4.Init(SAMPLE_RATE);
-  // osc5.Init(SAMPLE_RATE); //osc6.Init(SAMPLE_RATE); //osc7.Init(SAMPLE_RATE);
-  // //osc8.Init(SAMPLE_RATE);
+  
   env1.Init(SAMPLE_RATE);
   env2.Init(SAMPLE_RATE);
-  filter.Init(SAMPLE_RATE);
-  filter.SetFreq(1000.f);
-  filter.SetRes(0.6f);
-  filter.SetInputDrive(2.5f);
-  filter.SetPassbandGain(0.25f);
   env1.SetReleaseTime(.07f);
   env1.SetAttackTime(0.0016f);
   env2.SetAttackTime(0.001f);
@@ -209,12 +129,6 @@ void initOscillators() {
   env2.SetSustainLevel(0.3f);
   env2.SetReleaseTime(0.03f);
 
-  // Set initial waveform for all oscillators
-  osc1.SetWaveform(daisysp::Oscillator::WAVE_POLYBLEP_SAW);
-  osc2.SetWaveform(daisysp::Oscillator::WAVE_POLYBLEP_SAW);
-  osc3.SetWaveform(daisysp::Oscillator::WAVE_POLYBLEP_SAW);
-  osc4.SetWaveform(daisysp::Oscillator::WAVE_POLYBLEP_SAW);
-  //  osc5.SetWaveform(daisysp::Oscillator::WAVE_POLYBLEP_SAW);
 }
 
 // -----------------------------------------------------------------------------
@@ -366,14 +280,34 @@ void onStepCallback(uint32_t step) { // uClock provides the current step number
   // Ensure the step value wraps to the sequencer's number of steps (0-15)
   uint8_t wrapped_step = static_cast<uint8_t>(step % SEQUENCER_NUM_STEPS);
 
-  //  Serial.print("[uCLOCK] onStepCallback, uClock raw step: ");
-  //  Serial.print(step); Serial.print(", wrapped step for sequencer: ");
-  //  Serial.println(wrapped_step);
   // Advance the sequencer, passing all necessary external states
   seq.advanceStep(wrapped_step, mm,
                    button16Held, button17Held, button18Held,
                   selectedStepForEdit);
-                  
+
+  // --- CV1–CV3 PWM Output Update (per step) ---
+  // Access current step data
+  const Step& currentStep = seq.getStep(wrapped_step);
+
+  // Helper lambdas for mapping to PWM (0–65535 for 0–5V)
+  auto mapToPWM = [](float norm) -> uint16_t {
+    if (norm < 0.0f) norm = 0.0f;
+    if (norm > 1.0f) norm = 1.0f;
+    return static_cast<uint16_t>(norm * 65535.0f);
+  };
+  // Pitch mapping: map note (0–24) to 0–5V (full range)
+  auto noteToPWM = [](int note) -> uint16_t {
+    float v = (note < 0) ? 0.0f : (note > 24 ? 1.0f : note / 24.0f);
+    return static_cast<uint16_t>(v * 65535.0f);
+  };
+
+  // CV1: Pitch
+  analogWrite(CV1_PWM_PIN, noteToPWM(currentStep.note));
+  // CV2: Velocity
+  analogWrite(CV2_PWM_PIN, mapToPWM(currentStep.velocity));
+  // CV3: Filter
+  analogWrite(CV3_PWM_PIN, mapToPWM(currentStep.filter));
+
   // --- One-shot parameter record at the beginning of each step ---
   static int lastStepIndex = -1;
   
@@ -389,42 +323,14 @@ void initEnvelopeTriggers() {
   trigenv2 = false;
 }
 
-// Helper function to setup I2S audio
-void setupI2SAudio(audio_format_t *audioFormat, audio_i2s_config_t *i2sConfig) {
-  audio_i2s_setup(audioFormat, i2sConfig);
-  audio_i2s_connect(producer_pool);
-  audio_i2s_set_enabled(true);
-}
+
 void setup() {
-  // Initialize synthesizer components
-  initOscillators();
-  initEnvelopeTriggers();
+analogWriteFreq(120000);
+analogWriteResolution(16);
 
-  // Configure I2S audio format
-  static audio_format_t audioFormat = {.sample_freq = (uint32_t)SAMPLE_RATE,
-                                       .format = AUDIO_BUFFER_FORMAT_PCM_S16,
-                                       .channel_count = 2};
-
-  // Configure audio buffer format
-  static audio_buffer_format_t bufferFormat = {
-      .format = &audioFormat,
-      .sample_stride = 4 // Stride = channels (2) × bytes per sample (2)
-  };
-
-  // Initialize audio producer pool
-  producer_pool = audio_new_producer_pool(&bufferFormat, NUM_AUDIO_BUFFERS,
-                                          SAMPLES_PER_BUFFER);
-
-  // Configure I2S pins and parameters
-  audio_i2s_config_t i2sConfig = {.data_pin = PICO_AUDIO_I2S_DATA_PIN,
-                                  .clock_pin_base =
-                                      PICO_AUDIO_I2S_CLOCK_PIN_BASE,
-                                  .dma_channel = 0,
-                                  .pio_sm = 0};
-
-  // Setup and enable I2S audio
-  setupI2SAudio(&audioFormat, &i2sConfig);
+initEnvelopeTriggers();
 }
+
 
 void setup1() {
  
@@ -552,12 +458,7 @@ void update() {
 }
 
 void loop() {
-  // --- Audio Buffer Output --
-  audio_buffer_t *buf = take_audio_buffer(producer_pool, true);
-  if (buf) {
-    fill_audio_buffer(buf);
-    give_audio_buffer(producer_pool, buf);
-  }
+//  Use this loop to write to the PWM Outputs
 }
 void doLEDStuff() {
 

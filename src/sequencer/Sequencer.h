@@ -80,7 +80,6 @@ void setStepFiltFreq(uint8_t stepIdx, float filter);
   void setStep(int index, const Step& stepData);
 
 // Convert absolute MIDI note (0-127) to the semitone-offset scheme used by the audio thread
-    void setOscillatorFrequency(uint8_t midiNote);
   // Query step and playhead state
   const Step &getStep(uint8_t stepIdx) const;
   uint8_t getPlayhead() const;
