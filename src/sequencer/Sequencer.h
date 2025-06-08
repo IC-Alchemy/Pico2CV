@@ -8,9 +8,10 @@
  *
  * Example:
  *   #include "Sequencer.h"
- *   Sequencer seq;
+ *   SequencerIO* io = new HardwareSequencerIO();
+ *   Sequencer seq(io);
  *   // Initialize and start
- *   if (!seq.init()) { Serial.println("Sequencer init failed"); }
+ *   seq.init();
  *   seq.start();
  *
  *   // Configure steps
@@ -31,18 +32,17 @@
 #define SEQUENCER_H
 
 #include "SequencerDefs.h"
-extern volatile bool trigenv1;
-extern volatile bool trigenv2;
-#include <Adafruit_TinyUSB.h>
-#include <MIDI.h>
+#include "../interfaces/SequencerIO.h"
 
 #define SEQUENCER_NUM_STEPS 16
-
-extern midi::MidiInterface<midi::SerialMIDI<Adafruit_USBD_MIDI>> usb_midi;
 
 class Sequencer {
 public:
   Sequencer();
+  Sequencer(SequencerIO* io);
+  
+  // Set the I/O interface (for dependency injection)
+  void setIO(SequencerIO* io) { this->io = io; }
 
   // Step length (number of steps in the sequence, user-adjustable, max 16)
   uint8_t getStepLength() const { return stepLength; }
@@ -51,10 +51,8 @@ public:
   // Instantly play a step for real-time feedback (does not advance playhead)
   void playStepNow(uint8_t stepIdx);
 
- 
   void init();
 
- 
   // Start/stop sequencer
   void start();
   void stop();
@@ -63,38 +61,71 @@ public:
   /**
    * @brief Processes the sequencer logic for the given step.
    * @param current_uclock_step The current step number (0-15) provided by uClock.
+   * 
+   * This method has been refactored to separate concerns:
+   * - Pure step advancement logic
+   * - Parameter recording is handled separately
    */
-  void advanceStep(uint8_t current_uclock_step, int mm_distance,
-                    bool is_button16_held, bool is_button17_held, bool is_button18_held,
-                   int current_selected_step_for_edit);
+  void advanceStep(uint8_t current_uclock_step);
+  
+  /**
+   * @brief Records live parameters for the currently selected step.
+   * @param mm_distance Distance sensor reading
+   * @param is_button16_held Button 16 state
+   * @param is_button17_held Button 17 state  
+   * @param is_button18_held Button 18 state
+   * @param current_selected_step_for_edit Currently selected step for editing
+   */
+  void recordLiveParameters(int mm_distance, bool is_button16_held, 
+                           bool is_button17_held, bool is_button18_held,
+                           int current_selected_step_for_edit);
 
   // Toggle step ON/OFF
   void toggleStep(uint8_t stepIdx);
 
   // Set note for a step
   void setStepNote(uint8_t stepIdx, uint8_t note);
-void setStepVelocity(uint8_t stepIdx, uint8_t velocity);
-void setStepFiltFreq(uint8_t stepIdx, float filter);
+  void setStepVelocity(uint8_t stepIdx, uint8_t velocity);
+  void setStepFiltFreq(uint8_t stepIdx, float filter);
+  
   // Set full step data (overloads)
   void setStep(int index, bool gate, bool slide, int note, float velocity, float filter);
   void setStep(int index, const Step& stepData);
 
-// Convert absolute MIDI note (0-127) to the semitone-offset scheme used by the audio thread
   // Query step and playhead state
   const Step &getStep(uint8_t stepIdx) const;
   uint8_t getPlayhead() const;
   bool isRunning() const;
   
-public:
   int8_t getLastNote() const;
   void setLastNote(int8_t note);
 
-const SequencerState& getState() const;
-void triggerEnvelope();
+  const SequencerState& getState() const;
+  void triggerEnvelope();
   void releaseEnvelope();
 
+  // Monophonic note duration tracking (Step 2 integration plan)
+  /**
+   * @brief Start a monophonic note with a specified duration (in ticks).
+   * @param note MIDI note number to play.
+   * @param duration Number of ticks the note should last.
+   */
+  void startNote(uint8_t note, float velocity, uint16_t duration);
+
+  /**
+   * @brief Decrement the note duration counter. If zero, sends NoteOff and clears state.
+   */
+  void tickNoteDuration();
+
+  /**
+   * @brief Sends NoteOff for the current note and clears the active note state.
+   */
+  void handleNoteOff();
 
 private:
+  // I/O interface for hardware abstraction
+  SequencerIO* io = nullptr;
+  
   // Sequencer state now stored in SequencerState from SequencerDefs.h
   void resetState();
   void initializeSteps();
@@ -104,35 +135,15 @@ private:
 
   /**
    * @brief Tracks the last played MIDI note for proper noteOff handling.
- * Stores the actual MIDI note value sent. -1 means no note is currently playing.
+   * Stores the actual MIDI note value sent. -1 means no note is currently playing.
    */
   int8_t lastNote = -1;
-private:
+  
   uint8_t stepLength = SEQUENCER_NUM_STEPS; // Default 16, user-adjustable
-public:
-    // Monophonic note duration tracking (Step 2 integration plan)
-    /**
-     * @brief Start a monophonic note with a specified duration (in ticks).
-     * @param note MIDI note number to play.
-     * @param duration Number of ticks the note should last.
-     */
-    void startNote(uint8_t note, float velocity, uint16_t duration);
 
-    /**
-     * @brief Decrement the note duration counter. If zero, sends NoteOff and clears state.
-     */
-    void tickNoteDuration();
-
-    /**
-     * @brief Sends NoteOff for the current note and clears the active note state.
-     */
-    void handleNoteOff();
-
-private:
-    // Monophonic note duration tracking variables
-    int8_t currentNote = -1;           // -1 means no note is currently active
-    uint16_t noteDurationCounter = 0;  // Remaining duration in ticks
-
+  // Monophonic note duration tracking variables
+  int8_t currentNote = -1;           // -1 means no note is currently active
+  uint16_t noteDurationCounter = 0;  // Remaining duration in ticks
 };
 
 #endif // SEQUENCER_H
